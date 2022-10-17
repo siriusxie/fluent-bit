@@ -135,10 +135,7 @@ static void json_parse_stats (const char *json) {
 static int stats_cb (rd_kafka_t *rk, char *json, size_t json_len,
 		     void *opaque) {
 
-        /* Extract values for our own stats */
-        json_parse_stats(json);
-
-        //flb_plg_info(p_ins, "json='%s'", json);
+        flb_plg_info(p_ins, "stats_json='%s'", json);
 
         if (stats_fp)
                 fprintf(stats_fp, "%s\n", json);
@@ -226,7 +223,7 @@ struct flb_kafka *flb_kafka_conf_create(struct flb_output_instance *ins,
     rd_kafka_conf_set_log_cb(ctx->conf, cb_kafka_logger);
 
     tmp = flb_output_get_property("stats_log_name", ins);
-    stats_fp = fopen(tmp ? tmp : "fluent-bit_stats.log","a");
+    stats_fp = fopen(tmp ? tmp : "rdkafka/fluent-bit_stats.jsonl","a");
 
     p_ins = ctx->ins;
 
