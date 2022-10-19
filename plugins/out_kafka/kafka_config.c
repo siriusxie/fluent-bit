@@ -135,7 +135,7 @@ static void json_parse_stats (const char *json) {
 static int stats_cb (rd_kafka_t *rk, char *json, size_t json_len,
 		     void *opaque) {
 
-        flb_plg_info(p_ins, "stats_json='%s'", json);
+        // flb_plg_info(p_ins, "stats_json='%s'", json);
 
         if (stats_fp)
                 fprintf(stats_fp, "%s\n", json);
