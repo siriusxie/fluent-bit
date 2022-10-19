@@ -427,6 +427,11 @@ int flb_kafka_conf_destroy(struct flb_kafka *ctx)
         return 0;
     }
 
+    if (stats_fp) {
+        fflush(stats_fp);
+        fclose(stats_fp);
+    }
+
     if (ctx->brokers) {
         flb_free(ctx->brokers);
     }
