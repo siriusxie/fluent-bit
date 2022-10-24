@@ -95,6 +95,9 @@ static void log_ins_init() {
     update_log_name();
 
     flb_log_ins.cur_fp = fopen(flb_log_ins.log_name, "a");
+
+    flb_plg_info(p_ins, "init rdkafka log, pre='%s', suff=%s, name=%s, file_p=%p", 
+                 flb_log_ins.log_prefix, flb_log_ins.log_suffic, flb_log_ins.log_name, flb_log_ins.cur_fp);
 }
 
 static void log_ins_destory() {
@@ -113,7 +116,9 @@ static int stats_cb (rd_kafka_t *rk, char *json, size_t json_len,
         flb_log_ins.cur_log_cnt += 1;
         flb_log_ins.cur_len += json_len;
 
-        //flb_plg_info(p_ins, "json_len='%d', suff=%s", json_len, flb_log_ins.log_suffic);
+        flb_plg_info(p_ins, "json_len='%d', suff=%s", json_len, flb_log_ins.log_suffic);
+        flb_plg_info(p_ins, "init rdkafka log, pre='%s', suff=%s, name=%s, file_p=%p", 
+                     flb_log_ins.log_prefix, flb_log_ins.log_suffic, flb_log_ins.log_name, flb_log_ins.cur_fp);
 
         if (flb_log_ins.cur_len >= flb_log_ins.max_len) {
             fflush(flb_log_ins.cur_fp);
