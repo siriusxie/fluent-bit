@@ -28,119 +28,113 @@
 #include "kafka_topic.h"
 #include "kafka_callbacks.h"
 
-
 static struct {
-	int64_t  t_start;
-	int64_t  t_end;
-	int64_t  t_end_send;
-	uint64_t msgs;
-	uint64_t msgs_last;
-        uint64_t msgs_dr_ok;
-        uint64_t msgs_dr_err;
-        uint64_t bytes_dr_ok;
-	uint64_t bytes;
-	uint64_t bytes_last;
-	uint64_t tx;	
-    uint64_t tx_err;
-        uint64_t avg_rtt;
-        uint64_t offset;
-	int64_t  t_fetch_latency;
-	int64_t  t_last;
-        int64_t  t_enobufs_last;
-	int64_t  t_total;
-        int64_t  latency_last;
-        int64_t  latency_lo;
-        int64_t  latency_hi;
-        int64_t  latency_sum;
-        int      latency_cnt;
-    int64_t  last_offset;
-} cnt;
+    long long total_len;
+    long long total_log_cnt;
+    long long cur_len;
+    long long cur_log_cnt;
+    char *log_path;
+    char *log_prefix;
+    char *log_suffic;
+    char log_name[256];
+    uint32_t cur_batch;
 
-static FILE *stats_fp;
+    FILE *cur_fp;
+} flb_log_ins;
 
 static struct flb_output_instance * p_ins;
-/**
- * Find and extract single value from a two-level search.
- * First find 'field1', then find 'field2' and extract its value.
- * Returns 0 on miss else the value.
- */
-static uint64_t json_parse_fields (const char *json, const char **end,
-                                   const char *field1, const char *field2) {
-        const char *t = json;
-        const char *t2;
-        int len1 = (int)strlen(field1);
-        int len2 = (int)strlen(field2);
 
-        while ((t2 = strstr(t, field1))) {
-                uint64_t v;
-
-                t = t2;
-                t += len1;
-
-                /* Find field */
-                if (!(t2 = strstr(t, field2)))
-                        continue;
-                t2 += len2;
-
-                while (isspace((int)*t2))
-                        t2++;
-
-                v = strtoull(t2, (char **)&t, 10);
-                if (t2 == t)
-                        continue;
-
-                *end = t;
-                return v;
-        }
-
-        *end = t + strlen(t);
-        return 0;
+static void update_log_name() {
+    sprintf(flb_log_ins.log_name, "%s%s-%s-%s-%u.jsonl", 
+            flb_log_ins.log_path, 
+            flb_log_ins.log_prefix,
+            "rdkafka_stats", 
+            flb_log_ins.log_suffic, 
+            flb_log_ins.cur_batch);
 }
 
-/**
- * Parse various values from rdkafka stats
- */
-static void json_parse_stats (const char *json) {
-        const char *t;
-#define MAX_AVGS 100 /* max number of brokers to scan for rtt */
-        uint64_t avg_rtt[MAX_AVGS+1];
-        int avg_rtt_i     = 0;
+static void get_time_str() {
+    static char buffer[26];
+    int millisec;
+    struct tm* tm_info;
+    struct timeval tv;
 
-        /* Store totals at end of array */
-        avg_rtt[MAX_AVGS]     = 0;
+    gettimeofday(&tv, NULL);
 
-        /* Extract all broker RTTs */
-        t = json;
-        while (avg_rtt_i < MAX_AVGS && *t) {
-                avg_rtt[avg_rtt_i] = json_parse_fields(t, &t,
-                                                       "\"rtt\":",
-                                                       "\"avg\":");
+    millisec = lrint(tv.tv_usec/1000.0); // Round to nearest millisec
+    if (millisec>=1000) { // Allow for rounding up to nearest second
+        millisec -=1000;
+        tv.tv_sec++;
+    }
 
-                /* Skip low RTT values, means no messages are passing */
-                if (avg_rtt[avg_rtt_i] < 100 /*0.1ms*/)
-                        continue;
+    tm_info = localtime(&tv.tv_sec);
 
-
-                avg_rtt[MAX_AVGS] += avg_rtt[avg_rtt_i];
-                avg_rtt_i++;
-        }
-
-        if (avg_rtt_i > 0)
-                avg_rtt[MAX_AVGS] /= avg_rtt_i;
-
-        cnt.avg_rtt = avg_rtt[MAX_AVGS];
+    strftime(buffer, 26, "%Y-%m-%d", tm_info);
+    flb_log_ins.log_suffic = buffer;
 }
 
+static void log_ins_init() {
+    flb_log_ins.cur_fp = NULL;
+    flb_log_ins.total_len = 0;
+    flb_log_ins.total_log_cnt = 0;
+    flb_log_ins.cur_len = 0;
+    flb_log_ins.cur_log_cnt = 0;
+    flb_log_ins.cur_batch = 0;
+    memset(flb_log_ins.log_name, 0, sizeof(flb_log_ins.log_name));
+
+    char *pod_name = getenv("POD_NAME");
+    flb_log_ins.log_prefix = pod_name ? pod_name : "Default";
+
+    get_time_str();
+    if (!flb_log_ins.log_suffic) {
+        flb_log_ins.log_suffic = "default";
+    }
+
+    update_log_name();
+
+    flb_log_ins.cur_fp = fopen(flb_log_ins.log_name, "a");
+}
+
+static void log_ins_destory() {
+    if (flb_log_ins.cur_fp) {
+        fflush(flb_log_ins.cur_fp);
+        fclose(flb_log_ins.cur_fp);
+    }
+}
 
 static int stats_cb (rd_kafka_t *rk, char *json, size_t json_len,
 		     void *opaque) {
 
-        // flb_plg_info(p_ins, "stats_json='%s'", json);
+    if (flb_log_ins.cur_fp) {
+        fprintf(flb_log_ins.cur_fp, "%s\n", json);
 
-        if (stats_fp)
-                fprintf(stats_fp, "%s\n", json);
+        flb_log_ins.cur_log_cnt += 1;
+        flb_log_ins.cur_len += json_len;
+
+        //flb_plg_info(p_ins, "json_len='%d', suff=%s", json_len, flb_log_ins.log_suffic);
+
+        if (flb_log_ins.cur_len >= 500 * 1024 * 1024) {
+            fflush(flb_log_ins.cur_fp);
+            fclose(flb_log_ins.cur_fp);
+            
+            get_time_str();
+            if (!flb_log_ins.log_suffic) {
+                flb_log_ins.log_suffic = "default";
+            }
+            flb_log_ins.cur_batch = (flb_log_ins.cur_batch+1) % 100;
+            
+            flb_log_ins.cur_len = 0;
+            flb_log_ins.cur_log_cnt = 0;
+            update_log_name();
+            
+            flb_log_ins.cur_fp = fopen(flb_log_ins.log_name, "a");
+        }
+    }
+
 	return 0;
 }
+
+
 
 struct flb_kafka *flb_kafka_conf_create(struct flb_output_instance *ins,
                                         struct flb_config *config)
@@ -222,11 +216,11 @@ struct flb_kafka *flb_kafka_conf_create(struct flb_output_instance *ins,
     /* Callback: log */
     rd_kafka_conf_set_log_cb(ctx->conf, cb_kafka_logger);
 
-    tmp = flb_output_get_property("stats_log_name", ins);
-    stats_fp = fopen(tmp ? tmp : "rdkafka/fluent-bit_stats.jsonl","a");
-
     p_ins = ctx->ins;
 
+    tmp = flb_output_get_property("stats_log_path", ins);
+    flb_log_ins.log_path = tmp ? tmp : "/logs/";
+    log_ins_init();
     rd_kafka_conf_set_stats_cb(ctx->conf, stats_cb);
 
     char* stats_intvlstr = "5000";
@@ -427,10 +421,7 @@ int flb_kafka_conf_destroy(struct flb_kafka *ctx)
         return 0;
     }
 
-    if (stats_fp) {
-        fflush(stats_fp);
-        fclose(stats_fp);
-    }
+    log_ins_destory();
 
     if (ctx->brokers) {
         flb_free(ctx->brokers);
