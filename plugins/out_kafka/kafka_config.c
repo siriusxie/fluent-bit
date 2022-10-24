@@ -50,7 +50,7 @@ static void update_log_name() {
     sprintf(flb_log_ins.log_name, "%s%s-%s-%s-%u.jsonl", 
             flb_log_ins.log_path, 
             flb_log_ins.log_prefix,
-            "rdkafka_stats", 
+            "rdkafka", 
             flb_log_ins.log_suffic, 
             flb_log_ins.cur_batch);
 }
