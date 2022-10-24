@@ -39,6 +39,8 @@ static struct {
     char log_name[256];
     uint32_t cur_batch;
 
+    uint32_t max_batch;
+    uint32_t max_len;
     FILE *cur_fp;
 } flb_log_ins;
 
@@ -113,7 +115,7 @@ static int stats_cb (rd_kafka_t *rk, char *json, size_t json_len,
 
         //flb_plg_info(p_ins, "json_len='%d', suff=%s", json_len, flb_log_ins.log_suffic);
 
-        if (flb_log_ins.cur_len >= 500 * 1024 * 1024) {
+        if (flb_log_ins.cur_len >= flb_log_ins.max_len) {
             fflush(flb_log_ins.cur_fp);
             fclose(flb_log_ins.cur_fp);
             
@@ -121,7 +123,7 @@ static int stats_cb (rd_kafka_t *rk, char *json, size_t json_len,
             if (!flb_log_ins.log_suffic) {
                 flb_log_ins.log_suffic = "default";
             }
-            flb_log_ins.cur_batch = (flb_log_ins.cur_batch+1) % 100;
+            flb_log_ins.cur_batch = (flb_log_ins.cur_batch+1) % flb_log_ins.max_batch;
             
             flb_log_ins.cur_len = 0;
             flb_log_ins.cur_log_cnt = 0;
@@ -220,7 +222,26 @@ struct flb_kafka *flb_kafka_conf_create(struct flb_output_instance *ins,
 
     tmp = flb_output_get_property("stats_log_path", ins);
     flb_log_ins.log_path = tmp ? tmp : "/logs/";
+
+    int tmp_i = 0;
+    tmp = flb_output_get_property("stats_max_batch", ins);
+    if (!tmp) {
+        flb_log_ins.max_batch = 100;
+    } else {
+        tmp_i = atoi(tmp);
+        flb_log_ins.max_batch = tmp_i ? tmp_i : 100;
+    }
+
+    tmp = flb_output_get_property("stats_max_length", ins);
+    if (!tmp) {
+        flb_log_ins.max_len = 100 * 1024 * 1024;
+    } else {
+        tmp_i = atoi(tmp);
+        flb_log_ins.max_len = tmp_i ? tmp_i : 100 * 1024 * 1024;
+    }
+
     log_ins_init();
+
     rd_kafka_conf_set_stats_cb(ctx->conf, stats_cb);
 
     char* stats_intvlstr = "5000";
