@@ -56,6 +56,13 @@
 #define FLB_JSON_DATE_ISO8601     1
 #define FLB_JSON_DATE_ISO8601_FMT "%Y-%m-%dT%H:%M:%S"
 
+#define FLB_KAFKA_STATS_LOG_NAME "rdkafka_stats"
+#define FLB_KAFKA_STATS_LOG_TYPE "jsonl"
+#define FLB_KAFKA_STATS_DEFAULT_MAX_BATCH 100
+#define FLB_KAFKA_STATS_DEFAULT_MAX_LENGTH 100 * 1024 * 1024
+#define FLB_KAFKA_STATS_DEFAULT_INTERVAL "5000"
+
+
 struct flb_kafka_topic {
     int name_len;
     char *name;

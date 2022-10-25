@@ -46,16 +46,7 @@ static struct {
 
 static struct flb_output_instance * p_ins;
 
-static void update_log_name() {
-    sprintf(flb_log_ins.log_name, "%s%s-%s-%s-%u.jsonl", 
-            flb_log_ins.log_path, 
-            flb_log_ins.log_prefix,
-            "rdkafka", 
-            flb_log_ins.log_suffic, 
-            flb_log_ins.cur_batch);
-}
-
-static void get_time_str() {
+void get_time_str() {
     static char buffer[26];
     int millisec;
     struct tm* tm_info;
@@ -63,16 +54,33 @@ static void get_time_str() {
 
     gettimeofday(&tv, NULL);
 
-    millisec = lrint(tv.tv_usec/1000.0); // Round to nearest millisec
-    if (millisec>=1000) { // Allow for rounding up to nearest second
+    millisec = lrint(tv.tv_usec/1000.0);
+    if (millisec>=1000) { 
         millisec -=1000;
         tv.tv_sec++;
     }
 
     tm_info = localtime(&tv.tv_sec);
 
-    strftime(buffer, 26, "%Y-%m-%d", tm_info);
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d", tm_info);
     flb_log_ins.log_suffic = buffer;
+}
+
+static void update_log_file() {
+    get_time_str();
+    if (!flb_log_ins.log_suffic) {
+        flb_log_ins.log_suffic = "default";
+    }
+
+    sprintf(flb_log_ins.log_name, "%s%s-%s-%s-%u.%s", 
+            flb_log_ins.log_path, 
+            flb_log_ins.log_prefix,
+            FLB_KAFKA_STATS_LOG_NAME, 
+            flb_log_ins.log_suffic, 
+            flb_log_ins.cur_batch,
+            FLB_KAFKA_STATS_LOG_TYPE);
+    
+    flb_log_ins.cur_fp = fopen(flb_log_ins.log_name, "a");
 }
 
 static void log_ins_init() {
@@ -87,14 +95,7 @@ static void log_ins_init() {
     char *pod_name = getenv("POD_NAME");
     flb_log_ins.log_prefix = pod_name ? pod_name : "Default";
 
-    get_time_str();
-    if (!flb_log_ins.log_suffic) {
-        flb_log_ins.log_suffic = "default";
-    }
-
-    update_log_name();
-
-    flb_log_ins.cur_fp = fopen(flb_log_ins.log_name, "a");
+    update_log_file();
 
     flb_plg_info(p_ins, "init rdkafka log, pre='%s', suff=%s, name=%s, file_p=%p", 
                  flb_log_ins.log_prefix, flb_log_ins.log_suffic, flb_log_ins.log_name, flb_log_ins.cur_fp);
@@ -115,26 +116,19 @@ static int stats_cb (rd_kafka_t *rk, char *json, size_t json_len,
 
         flb_log_ins.cur_log_cnt += 1;
         flb_log_ins.cur_len += json_len;
-
-        flb_plg_info(p_ins, "json_len='%d', suff=%s", json_len, flb_log_ins.log_suffic);
-        flb_plg_info(p_ins, "init rdkafka log, pre='%s', suff=%s, name=%s, file_p=%p", 
-                     flb_log_ins.log_prefix, flb_log_ins.log_suffic, flb_log_ins.log_name, flb_log_ins.cur_fp);
+        flb_log_ins.total_log_cnt += 1;
+        flb_log_ins.total_len += json_len;
 
         if (flb_log_ins.cur_len >= flb_log_ins.max_len) {
             fflush(flb_log_ins.cur_fp);
             fclose(flb_log_ins.cur_fp);
             
-            get_time_str();
-            if (!flb_log_ins.log_suffic) {
-                flb_log_ins.log_suffic = "default";
-            }
             flb_log_ins.cur_batch = (flb_log_ins.cur_batch+1) % flb_log_ins.max_batch;
             
             flb_log_ins.cur_len = 0;
             flb_log_ins.cur_log_cnt = 0;
-            update_log_name();
-            
-            flb_log_ins.cur_fp = fopen(flb_log_ins.log_name, "a");
+
+            update_log_file();
         }
     }
 
@@ -231,25 +225,25 @@ struct flb_kafka *flb_kafka_conf_create(struct flb_output_instance *ins,
     int tmp_i = 0;
     tmp = flb_output_get_property("stats_max_batch", ins);
     if (!tmp) {
-        flb_log_ins.max_batch = 100;
+        flb_log_ins.max_batch = FLB_KAFKA_STATS_DEFAULT_MAX_BATCH;
     } else {
         tmp_i = atoi(tmp);
-        flb_log_ins.max_batch = tmp_i ? tmp_i : 100;
+        flb_log_ins.max_batch = tmp_i ? tmp_i : FLB_KAFKA_STATS_DEFAULT_MAX_BATCH;
     }
 
     tmp = flb_output_get_property("stats_max_length", ins);
     if (!tmp) {
-        flb_log_ins.max_len = 100 * 1024 * 1024;
+        flb_log_ins.max_len = FLB_KAFKA_STATS_DEFAULT_MAX_LENGTH;
     } else {
         tmp_i = atoi(tmp);
-        flb_log_ins.max_len = tmp_i ? tmp_i : 100 * 1024 * 1024;
+        flb_log_ins.max_len = tmp_i ? tmp_i : FLB_KAFKA_STATS_DEFAULT_MAX_LENGTH;
     }
 
     log_ins_init();
 
     rd_kafka_conf_set_stats_cb(ctx->conf, stats_cb);
 
-    char* stats_intvlstr = "5000";
+    char* stats_intvlstr = FLB_KAFKA_STATS_DEFAULT_INTERVAL;
     tmp = flb_output_get_property("stats_interval", ins);
 
     if (rd_kafka_conf_set(ctx->conf, "statistics.interval.ms",
