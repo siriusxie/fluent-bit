@@ -97,7 +97,7 @@ option(FLB_AWS                 "Enable AWS support"           Yes)
 option(FLB_STATIC_CONF         "Build binary using static configuration")
 option(FLB_STREAM_PROCESSOR    "Enable Stream Processor"      Yes)
 option(FLB_CORO_STACK_SIZE     "Set coroutine stack size")
-option(FLB_AVRO_ENCODER        "Build with Avro encoding support" No)
+option(FLB_AVRO_ENCODER        "Build with Avro encoding support" Yes)
 option(FLB_AWS_ERROR_REPORTER  "Build with aws error reporting support" No)
 
 
