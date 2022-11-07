@@ -49,11 +49,11 @@ static struct {
 static struct flb_output_instance * p_ins;
 
 static int max_brokers = 10000;
-static int waitresp_cnt_list[10000];
-static int avg_rtt_list[10000];
-static int p75_rtt_list[10000];
-static int p95_rtt_list[10000];
-static int p99_rtt_list[10000];
+static long long waitresp_cnt_list[10000];
+static long long avg_rtt_list[10000];
+static long long p75_rtt_list[10000];
+static long long p95_rtt_list[10000];
+static long long p99_rtt_list[10000];
 static char list_buffer[102400];
 static char print_buffer[102400];
 
@@ -119,14 +119,14 @@ static void log_ins_destory() {
     }
 }
 
-static void list_to_string(int *list, int size, char *buffer) {
+static void list_to_string(long long *list, int size, char *buffer) {
     memset(buffer, 0 , sizeof(buffer));
     sprintf(buffer, "%s%s", buffer, "[");
     for(int i=0; i<size; i++) {
         if (i) {
-            sprintf(buffer, "%s%s", buffer, ",");
+            sprintf(buffer, "%s%s", buffer, ":");
         }
-        sprintf(buffer, "%s%d", buffer, list[i]);
+        sprintf(buffer, "%s%lld", buffer, list[i]);
     }
     sprintf(buffer, "%s%s", buffer, "]");
 }
@@ -135,7 +135,8 @@ static void parse_json(char *json, size_t json_len) {
     json_t *root;
     json_error_t json_error;
 
-    root = json_loads(json, 0, &json_error);
+    // root = json_loads(json, 0, &json_error);
+    root = json_loads(json, JSON_DECODE_INT_AS_REAL | JSON_DECODE_ANY, &json_error);
     if (!root) {
         flb_plg_error(p_ins, "json parse error, line :%d, reason:%s, json:%s", 
                       json_error.line, json_error.text, json);
@@ -148,20 +149,20 @@ static void parse_json(char *json, size_t json_len) {
     }
 
     json_t *msg_cnt_js = json_object_get(root, "msg_cnt");
-    if (!json_is_integer(msg_cnt_js)) {
+    if (!json_is_real(msg_cnt_js)) {
         flb_plg_error(p_ins, "json parse msg_cnt, root: %s", json);
         json_decref(root);
         return;
     }
-    int msg_cnt = json_integer_value(msg_cnt_js);
+    long long msg_cnt = (long long) json_real_value(msg_cnt_js);
 
     json_t *msg_size_js = json_object_get(root, "msg_size");
-    if (!json_is_integer(msg_size_js)) {
+    if (!json_is_real(msg_size_js)) {
         flb_plg_error(p_ins, "json parse msg_size, root: %s", json);
         json_decref(root);
         return;
     }
-    int msg_size = json_integer_value(msg_size_js);
+    long long msg_size = (long long) json_real_value(msg_size_js);
 
 
     json_t *brokers = json_object_get(root, "brokers");
@@ -179,22 +180,21 @@ static void parse_json(char *json, size_t json_len) {
         json_decref(root);
         return;
     }
-    memset(waitresp_cnt_list, 0, sizeof(int) * (brokers_size + 5));
-    memset(avg_rtt_list, 0, sizeof(int) * (brokers_size + 5));
-    memset(p75_rtt_list, 0, sizeof(int) * (brokers_size + 5));
-    memset(p95_rtt_list, 0, sizeof(int) * (brokers_size + 5));
-    memset(p99_rtt_list, 0, sizeof(int) * (brokers_size + 5));
+    memset(waitresp_cnt_list, 0, sizeof(long long) * (brokers_size + 5));
+    memset(avg_rtt_list, 0, sizeof(long long) * (brokers_size + 5));
+    memset(p75_rtt_list, 0, sizeof(long long) * (brokers_size + 5));
+    memset(p95_rtt_list, 0, sizeof(long long) * (brokers_size + 5));
+    memset(p99_rtt_list, 0, sizeof(long long) * (brokers_size + 5));
     int idx = 0;
 
     json_object_foreach(brokers, key, value) {
         json_t *waitresp_msg_cnt_js = json_object_get(value, "waitresp_msg_cnt");
-        if (!json_is_integer(waitresp_msg_cnt_js)) {
+        if (!json_is_real(waitresp_msg_cnt_js)) {
             flb_plg_error(p_ins, "json parse waitresp_msg_cnt, root: %s", json);
             json_decref(root);
             return;
         }
-        int waitresp_msg_cnt = json_integer_value(waitresp_msg_cnt_js);
-        waitresp_cnt_list[idx] = waitresp_msg_cnt;
+        waitresp_cnt_list[idx] = (long long) json_real_value(waitresp_msg_cnt_js);
 
         json_t *rtt = json_object_get(value, "rtt");
         if (!json_is_object(rtt)) {
@@ -204,41 +204,41 @@ static void parse_json(char *json, size_t json_len) {
         }
 
         json_t *avg_rtt = json_object_get(rtt, "avg");
-        if (!json_is_integer(avg_rtt)) {
+        if (!json_is_real(avg_rtt)) {
             flb_plg_error(p_ins, "json parse avg_rtt, root: %s", json);
             json_decref(root);
             return;
         }
-        avg_rtt_list[idx] = json_integer_value(avg_rtt);
+        avg_rtt_list[idx] = (long long) json_real_value(avg_rtt);
 
         json_t *p75_rtt = json_object_get(rtt, "p75");
-        if (!json_is_integer(p75_rtt)) {
+        if (!json_is_real(p75_rtt)) {
             flb_plg_error(p_ins, "json parse p75_rtt, root: %s", json);
             json_decref(root);
             return;
         }
-        p75_rtt_list[idx] = json_integer_value(p75_rtt);
+        p75_rtt_list[idx] = (long long) json_real_value(p75_rtt);
 
         json_t *p95_rtt = json_object_get(rtt, "p95");
-        if (!json_is_integer(p95_rtt)) {
+        if (!json_is_real(p95_rtt)) {
             flb_plg_error(p_ins, "json parse p95_rtt, root: %s", json);
             json_decref(root);
             return;
         }
-        p95_rtt_list[idx] = json_integer_value(p95_rtt);
+        p95_rtt_list[idx] = (long long) json_real_value(p95_rtt);
 
         json_t *p99_rtt = json_object_get(rtt, "p99");
-        if (!json_is_integer(p99_rtt)) {
+        if (!json_is_real(p99_rtt)) {
             flb_plg_error(p_ins, "json parse p99_rtt, root: %s", json);
             json_decref(root);
             return;
         }
-        p99_rtt_list[idx] = json_integer_value(p99_rtt);
+        p99_rtt_list[idx] = (long long) json_real_value(p99_rtt);
 
         idx++;
     }
 
-    flb_sds_t sds = flb_sds_create_size(4096 * 5 + brokers_size * 5 * sizeof(long long) + 2 * sizeof(long long));
+    flb_sds_t sds = flb_sds_create_size(4096 * 5 + brokers_size * 10 * sizeof(long long) + 2 * sizeof(long long));
     flb_sds_t tmp_sds;
 
     struct flb_time tp;
