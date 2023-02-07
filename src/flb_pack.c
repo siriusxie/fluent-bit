@@ -834,6 +834,10 @@ flb_sds_t flb_pack_msgpack_to_json_format(const char *data, uint64_t bytes,
     msgpack_sbuffer_init(&tmp_sbuf);
     msgpack_packer_init(&tmp_pck, &tmp_sbuf, msgpack_sbuffer_write);
 
+    msgpack_pack_map(&tmp_pck, 1);
+    msgpack_pack_str(&tmp_pck, 8);
+    msgpack_pack_str_body(&tmp_pck, "requests", 8);
+
     /*
      * If the format is the original msgpack style of one big array,
      * registrate the array, otherwise is not necessary. FYI, original format:
@@ -1020,6 +1024,8 @@ flb_sds_t flb_pack_msgpack_to_json_format(const char *data, uint64_t bytes,
         flb_sds_destroy(out_buf);
         return NULL;
     }
+
+    //printf("test http : %s\n", out_buf);
 
     return out_buf;
 }

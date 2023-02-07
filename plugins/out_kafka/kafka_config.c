@@ -28,6 +28,287 @@
 #include "kafka_topic.h"
 #include "kafka_callbacks.h"
 
+#include "jansson.h"
+
+static struct {
+    long long total_len;
+    long long total_log_cnt;
+    long long cur_len;
+    long long cur_log_cnt;
+    char *log_path;
+    char *log_prefix;
+    char *log_suffic;
+    char log_name[256];
+    uint32_t cur_batch;
+
+    uint32_t max_batch;
+    uint32_t max_len;
+    FILE *cur_fp;
+} flb_log_ins;
+
+static struct flb_output_instance * p_ins;
+
+static int max_brokers = 10000;
+static long long waitresp_cnt_list[10000];
+static long long avg_rtt_list[10000];
+static long long p75_rtt_list[10000];
+static long long p95_rtt_list[10000];
+static long long p99_rtt_list[10000];
+static char list_buffer[102400];
+static char print_buffer[102400];
+
+void get_time_str() {
+    static char buffer[26];
+    int millisec;
+    struct tm* tm_info;
+    struct timeval tv;
+
+    gettimeofday(&tv, NULL);
+
+    millisec = lrint(tv.tv_usec/1000.0);
+    if (millisec>=1000) { 
+        millisec -=1000;
+        tv.tv_sec++;
+    }
+
+    tm_info = localtime(&tv.tv_sec);
+
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d", tm_info);
+    flb_log_ins.log_suffic = buffer;
+}
+
+static void update_log_file() {
+    get_time_str();
+    if (!flb_log_ins.log_suffic) {
+        flb_log_ins.log_suffic = "default";
+    }
+
+    sprintf(flb_log_ins.log_name, "%s%s-%s-%s-%u.%s", 
+            flb_log_ins.log_path, 
+            flb_log_ins.log_prefix,
+            FLB_KAFKA_STATS_LOG_NAME, 
+            flb_log_ins.log_suffic, 
+            flb_log_ins.cur_batch,
+            FLB_KAFKA_STATS_LOG_TYPE);
+    
+    flb_log_ins.cur_fp = fopen(flb_log_ins.log_name, "a");
+}
+
+static void log_ins_init() {
+    flb_log_ins.cur_fp = NULL;
+    flb_log_ins.total_len = 0;
+    flb_log_ins.total_log_cnt = 0;
+    flb_log_ins.cur_len = 0;
+    flb_log_ins.cur_log_cnt = 0;
+    flb_log_ins.cur_batch = 0;
+    memset(flb_log_ins.log_name, 0, sizeof(flb_log_ins.log_name));
+
+    char *pod_name = getenv("POD_NAME");
+    flb_log_ins.log_prefix = pod_name ? pod_name : "Default";
+
+    update_log_file();
+
+    flb_plg_info(p_ins, "init rdkafka log, pre='%s', suff=%s, name=%s, file_p=%p", 
+                 flb_log_ins.log_prefix, flb_log_ins.log_suffic, flb_log_ins.log_name, flb_log_ins.cur_fp);
+}
+
+static void log_ins_destory() {
+    if (flb_log_ins.cur_fp) {
+        fflush(flb_log_ins.cur_fp);
+        fclose(flb_log_ins.cur_fp);
+    }
+}
+
+static void list_to_string(long long *list, int size, char *buffer) {
+    memset(buffer, 0 , sizeof(buffer));
+    sprintf(buffer, "%s%s", buffer, "[");
+    for(int i=0; i<size; i++) {
+        if (i) {
+            sprintf(buffer, "%s%s", buffer, ":");
+        }
+        sprintf(buffer, "%s%lld", buffer, list[i]);
+    }
+    sprintf(buffer, "%s%s", buffer, "]");
+}
+
+static void parse_json(char *json, size_t json_len) {
+    json_t *root;
+    json_error_t json_error;
+
+    // root = json_loads(json, 0, &json_error);
+    root = json_loads(json, JSON_DECODE_INT_AS_REAL | JSON_DECODE_ANY, &json_error);
+    if (!root) {
+        flb_plg_error(p_ins, "json parse error, line :%d, reason:%s, json:%s", 
+                      json_error.line, json_error.text, json);
+        return;
+    }
+    if (!json_is_object(root)) {
+        flb_plg_error(p_ins, "json format error, root: %s", json);
+        json_decref(root);
+        return;
+    }
+
+    json_t *msg_cnt_js = json_object_get(root, "msg_cnt");
+    if (!json_is_real(msg_cnt_js)) {
+        flb_plg_error(p_ins, "json parse msg_cnt, root: %s", json);
+        json_decref(root);
+        return;
+    }
+    long long msg_cnt = (long long) json_real_value(msg_cnt_js);
+
+    json_t *msg_size_js = json_object_get(root, "msg_size");
+    if (!json_is_real(msg_size_js)) {
+        flb_plg_error(p_ins, "json parse msg_size, root: %s", json);
+        json_decref(root);
+        return;
+    }
+    long long msg_size = (long long) json_real_value(msg_size_js);
+
+
+    json_t *brokers = json_object_get(root, "brokers");
+    if (!json_is_object(brokers)) {
+        flb_plg_error(p_ins, "json parse brokers, root: %s", json);
+        json_decref(root);
+        return;
+    }
+
+    const char *key;
+    json_t *value;
+    int brokers_size = json_object_size(brokers);
+    if (!brokers_size || brokers_size > max_brokers) {
+        flb_plg_error(p_ins, "json brokers size error, root: %s", json);
+        json_decref(root);
+        return;
+    }
+    memset(waitresp_cnt_list, 0, sizeof(long long) * (brokers_size + 5));
+    memset(avg_rtt_list, 0, sizeof(long long) * (brokers_size + 5));
+    memset(p75_rtt_list, 0, sizeof(long long) * (brokers_size + 5));
+    memset(p95_rtt_list, 0, sizeof(long long) * (brokers_size + 5));
+    memset(p99_rtt_list, 0, sizeof(long long) * (brokers_size + 5));
+    int idx = 0;
+
+    json_object_foreach(brokers, key, value) {
+        json_t *waitresp_msg_cnt_js = json_object_get(value, "waitresp_msg_cnt");
+        if (!json_is_real(waitresp_msg_cnt_js)) {
+            flb_plg_error(p_ins, "json parse waitresp_msg_cnt, root: %s", json);
+            json_decref(root);
+            return;
+        }
+        waitresp_cnt_list[idx] = (long long) json_real_value(waitresp_msg_cnt_js);
+
+        json_t *rtt = json_object_get(value, "rtt");
+        if (!json_is_object(rtt)) {
+            flb_plg_error(p_ins, "json parse rtt, root: %s", json);
+            json_decref(root);
+            return;
+        }
+
+        json_t *avg_rtt = json_object_get(rtt, "avg");
+        if (!json_is_real(avg_rtt)) {
+            flb_plg_error(p_ins, "json parse avg_rtt, root: %s", json);
+            json_decref(root);
+            return;
+        }
+        avg_rtt_list[idx] = (long long) json_real_value(avg_rtt);
+
+        json_t *p75_rtt = json_object_get(rtt, "p75");
+        if (!json_is_real(p75_rtt)) {
+            flb_plg_error(p_ins, "json parse p75_rtt, root: %s", json);
+            json_decref(root);
+            return;
+        }
+        p75_rtt_list[idx] = (long long) json_real_value(p75_rtt);
+
+        json_t *p95_rtt = json_object_get(rtt, "p95");
+        if (!json_is_real(p95_rtt)) {
+            flb_plg_error(p_ins, "json parse p95_rtt, root: %s", json);
+            json_decref(root);
+            return;
+        }
+        p95_rtt_list[idx] = (long long) json_real_value(p95_rtt);
+
+        json_t *p99_rtt = json_object_get(rtt, "p99");
+        if (!json_is_real(p99_rtt)) {
+            flb_plg_error(p_ins, "json parse p99_rtt, root: %s", json);
+            json_decref(root);
+            return;
+        }
+        p99_rtt_list[idx] = (long long) json_real_value(p99_rtt);
+
+        idx++;
+    }
+
+    flb_sds_t sds = flb_sds_create_size(4096 * 5 + brokers_size * 10 * sizeof(long long) + 2 * sizeof(long long));
+    flb_sds_t tmp_sds;
+
+    struct flb_time tp;
+    long now;
+    int time_len;
+    char time_str[64];
+
+    flb_time_get(&tp);
+    now = flb_time_to_nanosec(&tp) / 1000000; /* in milliseconds */
+    time_len = snprintf(time_str, sizeof(time_str) - 1, "%lu", now);
+
+    tmp_sds = flb_sds_printf(&sds, "rdkafka_stats_log, timestamp=%s, msg_cnt=%d, msg_size=%d, ",time_str , msg_cnt, msg_size);
+    list_to_string(waitresp_cnt_list, brokers_size, list_buffer);
+    tmp_sds = flb_sds_cat(sds, "waitresp_msg_cnt=", 17);
+    tmp_sds = flb_sds_cat(sds, list_buffer, strlen(list_buffer));
+    tmp_sds = flb_sds_cat(sds, ", ", 2);
+
+    list_to_string(avg_rtt_list, brokers_size, list_buffer);
+    tmp_sds = flb_sds_cat(sds, "avg_rtt=", 8);
+    tmp_sds = flb_sds_cat(sds, list_buffer, strlen(list_buffer));
+    tmp_sds = flb_sds_cat(sds, ", ", 2);
+    list_to_string(p75_rtt_list, brokers_size, list_buffer);
+    tmp_sds = flb_sds_cat(sds, "p75_rtt=", 8);
+    tmp_sds = flb_sds_cat(sds, list_buffer, strlen(list_buffer));
+    tmp_sds = flb_sds_cat(sds, ", ", 2);
+    list_to_string(p95_rtt_list, brokers_size, list_buffer);
+    tmp_sds = flb_sds_cat(sds, "p95_rtt=", 8);
+    tmp_sds = flb_sds_cat(sds, list_buffer, strlen(list_buffer));
+    tmp_sds = flb_sds_cat(sds, ", ", 2);
+    list_to_string(p99_rtt_list, brokers_size, list_buffer);
+    tmp_sds = flb_sds_cat(sds, "p99_rtt=", 8);
+    tmp_sds = flb_sds_cat(sds, list_buffer, strlen(list_buffer));
+    printf("%s\n", sds);
+    flb_sds_destroy(sds);
+
+    json_decref(root);
+}
+
+static int stats_cb (rd_kafka_t *rk, char *json, size_t json_len,
+		     void *opaque) {
+
+    if (flb_log_ins.cur_fp) {
+        fprintf(flb_log_ins.cur_fp, "%s\n", json);
+
+        parse_json(json, json_len);
+        //printf("rdkafka raw stats log, json='%s'\n", json);
+
+        flb_log_ins.cur_log_cnt += 1;
+        flb_log_ins.cur_len += json_len;
+        flb_log_ins.total_log_cnt += 1;
+        flb_log_ins.total_len += json_len;
+
+        if (flb_log_ins.cur_len >= flb_log_ins.max_len) {
+            fflush(flb_log_ins.cur_fp);
+            fclose(flb_log_ins.cur_fp);
+            
+            flb_log_ins.cur_batch = (flb_log_ins.cur_batch+1) % flb_log_ins.max_batch;
+            
+            flb_log_ins.cur_len = 0;
+            flb_log_ins.cur_log_cnt = 0;
+
+            update_log_file();
+        }
+    }
+
+	return 0;
+}
+
+
+
 struct flb_kafka *flb_kafka_conf_create(struct flb_output_instance *ins,
                                         struct flb_config *config)
 {
@@ -107,6 +388,43 @@ struct flb_kafka *flb_kafka_conf_create(struct flb_output_instance *ins,
 
     /* Callback: log */
     rd_kafka_conf_set_log_cb(ctx->conf, cb_kafka_logger);
+
+    p_ins = ctx->ins;
+
+    tmp = flb_output_get_property("stats_log_path", ins);
+    flb_log_ins.log_path = tmp ? tmp : "/logs/";
+
+    int tmp_i = 0;
+    tmp = flb_output_get_property("stats_max_batch", ins);
+    if (!tmp) {
+        flb_log_ins.max_batch = FLB_KAFKA_STATS_DEFAULT_MAX_BATCH;
+    } else {
+        tmp_i = atoi(tmp);
+        flb_log_ins.max_batch = tmp_i ? tmp_i : FLB_KAFKA_STATS_DEFAULT_MAX_BATCH;
+    }
+
+    tmp = flb_output_get_property("stats_max_length", ins);
+    if (!tmp) {
+        flb_log_ins.max_len = FLB_KAFKA_STATS_DEFAULT_MAX_LENGTH;
+    } else {
+        tmp_i = atoi(tmp);
+        flb_log_ins.max_len = tmp_i ? tmp_i : FLB_KAFKA_STATS_DEFAULT_MAX_LENGTH;
+    }
+
+    log_ins_init();
+
+    rd_kafka_conf_set_stats_cb(ctx->conf, stats_cb);
+
+    char* stats_intvlstr = FLB_KAFKA_STATS_DEFAULT_INTERVAL;
+    tmp = flb_output_get_property("stats_interval", ins);
+
+    if (rd_kafka_conf_set(ctx->conf, "statistics.interval.ms",
+                          tmp ? tmp : stats_intvlstr,
+                          errstr, sizeof(errstr)) !=
+        RD_KAFKA_CONF_OK) {
+            fprintf(stderr, "%% %s\n", errstr);
+            exit(1);
+    }
 
     /* Config: Topic_Key */
     tmp = flb_output_get_property("topic_key", ins);
@@ -294,6 +612,8 @@ int flb_kafka_conf_destroy(struct flb_kafka *ctx)
     if (!ctx) {
         return 0;
     }
+
+    log_ins_destory();
 
     if (ctx->brokers) {
         flb_free(ctx->brokers);
